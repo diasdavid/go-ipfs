@@ -1,0 +1,10 @@
+machine:
+  environment:
+    TEST_NO_FUSE: 1
+    TEST_VERBOSE: 1
+    TRAVIS: 1
+
+test:
+  override:
+    - make test_go_expensive
+    - make test_sharness_expensive
