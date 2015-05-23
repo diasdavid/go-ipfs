@@ -68,15 +68,14 @@ func listenAndServe(node *core.IpfsNode, addr ma.Multiaddr, handler http.Handler
 		return err
 	}
 
-	host, port, err := net.SplitHostPort(list.Addr().String())
+	listenMaAddr, err := manet.FromNetAddr(list.Addr())
 	if err != nil {
 		return err
 	}
-
-	listenMaAddr := fmt.Sprintf("/ip4/%s/tcp/%s", host, port)
 	if err := node.Repo.SetConfigKey("Addresses.API", listenMaAddr); err != nil {
 		return err
 	}
+
 	fmt.Printf("API server listening on %s\n", listenMaAddr)
 
 	// if the server exits beforehand
