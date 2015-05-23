@@ -5,6 +5,7 @@ high-level HTTP interfaces to IPFS.
 package corehttp
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"time"
@@ -66,6 +67,17 @@ func listenAndServe(node *core.IpfsNode, addr ma.Multiaddr, handler http.Handler
 	if err != nil {
 		return err
 	}
+
+	host, port, err := net.SplitHostPort(list.Addr().String())
+	if err != nil {
+		return err
+	}
+
+	listenMaAddr := fmt.Sprintf("/ip4/%s/tcp/%s", host, port)
+	if err := node.Repo.SetConfigKey("Addresses.API", listenMaAddr); err != nil {
+		return err
+	}
+	fmt.Printf("API server listening on %s\n", listenMaAddr)
 
 	// if the server exits beforehand
 	var serverError error
