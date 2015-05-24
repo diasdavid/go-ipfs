@@ -3,13 +3,15 @@ package main
 import (
 	_ "expvar"
 	"fmt"
-	_ "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/codahale/metrics/runtime"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"strings"
 
+	_ "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/codahale/metrics/runtime"
 	ma "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-multiaddr"
+	"github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-multiaddr-net"
+
 	cmds "github.com/ipfs/go-ipfs/commands"
 	"github.com/ipfs/go-ipfs/core"
 	commands "github.com/ipfs/go-ipfs/core/commands"
@@ -192,24 +194,7 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 		return node, nil
 	}
 
-	// verify api address is valid multiaddr
-	apiMaddr, err := ma.NewMultiaddr(cfg.Addresses.API)
-	if err != nil {
-		res.SetError(err, cmds.ErrNormal)
-		return
-	}
-
-	var gatewayMaddr ma.Multiaddr
-	if len(cfg.Addresses.Gateway) > 0 {
-		// ignore error for gateway address
-		// if there is an error (invalid address), then don't run the gateway
-		gatewayMaddr, _ = ma.NewMultiaddr(cfg.Addresses.Gateway)
-		if gatewayMaddr == nil {
-			log.Errorf("Invalid gateway address: %s", cfg.Addresses.Gateway)
-		}
-	}
-
-	// mount if the user provided the --mount flag
+	// mount fuse if the user provided the --mount flag
 	mount, _, err := req.Option(mountKwd).Bool()
 	if err != nil {
 		res.SetError(err, cmds.ErrNormal)
@@ -243,6 +228,17 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 		fmt.Printf("IPNS mounted at: %s\n", nsdir)
 	}
 
+	// construct http gateway
+	var gatewayMaddr ma.Multiaddr
+	if len(cfg.Addresses.Gateway) > 0 {
+		// ignore error for gateway address
+		// if there is an error (invalid address), then don't run the gateway
+		gatewayMaddr, _ = ma.NewMultiaddr(cfg.Addresses.Gateway)
+		if gatewayMaddr == nil {
+			log.Errorf("Invalid gateway address: %s", cfg.Addresses.Gateway)
+		}
+	}
+
 	var rootRedirect corehttp.ServeOption
 	if len(cfg.Gateway.RootRedirect) > 0 {
 		rootRedirect = corehttp.RedirectOption("", cfg.Gateway.RootRedirect)
@@ -258,28 +254,59 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 	}
 
 	if gatewayMaddr != nil {
+
+		gwLis, err := manet.Listen(gatewayMaddr)
+		if err != nil {
+			res.SetError(err, cmds.ErrNormal)
+			return
+		}
+		// we might have listened to /tcp/0 - lets see what we are listing on
+		gatewayMaddr = gwLis.Multiaddr()
+
+		if writable {
+			fmt.Printf("Gateway (writable) server listening on %s\n", gatewayMaddr)
+		} else {
+			fmt.Printf("Gateway (readonly) server listening on %s\n", gatewayMaddr)
+		}
+		var opts = []corehttp.ServeOption{
+			corehttp.VersionOption(),
+			corehttp.IPNSHostnameOption(),
+			corehttp.GatewayOption(writable),
+		}
+		if rootRedirect != nil {
+			opts = append(opts, rootRedirect)
+		}
 		go func() {
-			var opts = []corehttp.ServeOption{
-				corehttp.VersionOption(),
-				corehttp.IPNSHostnameOption(),
-				corehttp.GatewayOption(writable),
-			}
-			if rootRedirect != nil {
-				opts = append(opts, rootRedirect)
-			}
-			if writable {
-				fmt.Printf("Gateway (writable) server listening on %s\n", gatewayMaddr)
-			} else {
-				fmt.Printf("Gateway (readonly) server listening on %s\n", gatewayMaddr)
-			}
-			err := corehttp.ListenAndServe(node, gatewayMaddr.String(), opts...)
+			err := corehttp.Serve(node, gwLis.NetListener(), opts...)
 			if err != nil {
 				log.Error(err)
 			}
 		}()
 	}
 
-	gateway := corehttp.NewGateway(corehttp.GatewayConfig{
+	// construct api endpoint
+	apiMaddr, err := ma.NewMultiaddr(cfg.Addresses.API)
+	if err != nil {
+		res.SetError(err, cmds.ErrNormal)
+		return
+	}
+
+	apiLis, err := manet.Listen(apiMaddr)
+	if err != nil {
+		res.SetError(err, cmds.ErrNormal)
+		return
+	}
+	// we might have listened to /tcp/0 - lets see what we are listing on
+	apiMaddr = apiLis.Multiaddr()
+	fmt.Printf("API server listening on %s\n", apiMaddr)
+
+	// TODO: dont persist in config - write to lock file..
+	if err := node.Repo.SetConfigKey("Addresses.API", apiMaddr.String()); err != nil {
+		res.SetError(err, cmds.ErrNormal)
+		return
+	}
+
+	apiGw := corehttp.NewGateway(corehttp.GatewayConfig{
 		Writable: true,
 		BlockList: &corehttp.BlockList{
 			Decider: func(s string) bool {
@@ -300,7 +327,7 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 	var opts = []corehttp.ServeOption{
 		corehttp.CommandsOption(*req.Context()),
 		corehttp.WebUIOption,
-		gateway.ServeOption(),
+		apiGw.ServeOption(),
 		corehttp.VersionOption(),
 		defaultMux("/debug/vars"),
 		defaultMux("/debug/pprof/"),
@@ -310,8 +337,9 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 		opts = append(opts, rootRedirect)
 	}
 
-	if err := corehttp.ListenAndServe(node, apiMaddr.String(), opts...); err != nil {
+	if err := corehttp.Serve(node, apiLis.NetListener(), opts...); err != nil {
 		res.SetError(err, cmds.ErrNormal)
 		return
 	}
+
 }
